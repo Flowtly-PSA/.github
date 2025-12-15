@@ -1,4 +1,4 @@
-# Flowtly
+# Flowtly, ERP, AI, Agents
 
 **Flowtly** is building the next generation of intelligent workflow automation — helping teams move faster, reduce manual work, and turn complex processes into simple, reliable flows.
 
@@ -53,7 +53,7 @@ If you’re interested in:
 - Working at the intersection of **automation, AI, and UX**
 
 👉 **Check out our open roles:**  
-**https://flowtly.com/careers**
+**https://flowtly.com/career**
 
 ---
 

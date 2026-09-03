@@ -54,8 +54,19 @@ first, *faster runs* second.
    schedule entirely when the downstream job is known-broken** (e.g. depleted API
    credits) — a cron that no-ops still bills a runner every fire.
 
-8. **Stay on `ubuntu-*` runners.** macOS bills 10× and Windows 2×. Android/most
-   builds run fine on Linux; only reach for macOS when you genuinely need Xcode.
+8. **Never macOS or Windows; prefer the self-hosted fleet over `ubuntu-*`.** macOS
+   bills 10× and Windows 2×, and Android/most builds run fine on Linux — only
+   reach for macOS when you genuinely need Xcode. Between the two Linux options,
+   `runs-on: [self-hosted, Linux, X64]` bills nothing and `ubuntu-*` bills at 1×,
+   so self-hosted is the default for new work; as of 2026-09-03 nearly every
+   workflow in the org runs there. Two things to know before you use it:
+   `flowtly-app-backend` additionally requires a pool label (`physical` or
+   `db-capable`) and `timeout-minutes` on every self-hosted job, enforced by its
+   own test; and the fleet does not ship everything GitHub's image does, so a
+   workflow that calls a binary must install it. `flowtly-global/docs/RUNNERS.md`
+   lists the runners, what each label gates, and the gaps. Staying on `ubuntu-*`
+   is still right for a job that must not depend on the fleet it reports on, or
+   that needs something the fleet lacks — say so in a comment when you do.
 
 ## Checklist when reviewing a workflow change
 
@@ -65,4 +76,5 @@ first, *faster runs* second.
 - [ ] No path filter on a *required* check
 - [ ] Not re-running something another workflow already does
 - [ ] Crons at the slowest acceptable cadence; paused if downstream is down
-- [ ] `ubuntu-*` runner
+- [ ] Self-hosted runner where possible, `ubuntu-*` otherwise — never macOS/Windows
+- [ ] If self-hosted: every binary the job calls is installed by the job

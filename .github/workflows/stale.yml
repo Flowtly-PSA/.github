@@ -1,0 +1,14 @@
+name: Stale pull requests
+
+on:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+jobs:
+  stale:
+    uses: Flowtly-PSA/.github/.github/workflows/stale-prs.yml@main
+    permissions:
+      actions: write
+      issues: write
+      pull-requests: write

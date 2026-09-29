@@ -1,0 +1,40 @@
+# Reusable: mark inactive pull requests stale, then close them. Issues are never touched.
+# Every setting lives here; callers only schedule it. See WORKFLOWS.md for the caller.
+name: Stale pull requests
+
+on:
+  workflow_call:
+
+permissions:
+  actions: write # actions/stale keeps its run state in the Actions cache and deletes the old entry
+  issues: write # labels on a pull request go through the issues API
+  pull-requests: write
+
+jobs:
+  stale:
+    # ubuntu-* rather than the self-hosted fleet: this job also runs in Flowtly-PSA/.github,
+    # which is public, and the fleet's runner group does not serve public repositories.
+    # One job of a few seconds per repository per week.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: stale-prs-${{ github.repository }}
+      cancel-in-progress: true
+    steps:
+      - uses: actions/stale@4391f3da665fdf50b6810c1a66712fb9ba21aa93 # v11.0.0
+        with:
+          days-before-issue-stale: -1
+          days-before-issue-close: -1
+          days-before-pr-stale: 14
+          days-before-pr-close: 16
+          stale-pr-label: stale
+          exempt-pr-labels: keep-open
+          remove-pr-stale-when-updated: true
+          delete-branch: false
+          operations-per-run: 100
+          stale-pr-message: >-
+            This pull request has had no activity for 14 days and will be closed in about 2 weeks
+            unless it is updated. Add the `keep-open` label to exempt it.
+          close-pr-message: >-
+            This pull request was closed after about 30 days without activity. The branch has been
+            kept, so the pull request can be reopened at any time.

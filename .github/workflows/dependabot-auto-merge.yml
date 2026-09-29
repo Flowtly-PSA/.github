@@ -1,0 +1,63 @@
+# Reusable: enable auto-merge on Dependabot pull requests that are minor or patch updates.
+# Every setting lives here; callers only wire the pull_request event. See WORKFLOWS.md.
+name: Dependabot auto-merge
+
+on:
+  workflow_call:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  auto-merge:
+    if: github.actor == 'dependabot[bot]' && github.event.pull_request.draft == false
+    # ubuntu-* rather than the self-hosted fleet: this job calls `gh`, which the fleet does not
+    # ship (flowtly-global docs/RUNNERS.md, toolchain gaps). It runs for a few seconds.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: dependabot-auto-merge-${{ github.repository }}-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    steps:
+      - id: metadata
+        uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
+
+      # update-type is the highest semver change in the pull request, so a grouped pull request
+      # qualifies only when every update in it is minor or patch. A security update qualifies on
+      # the same terms; a semver-major one, or one with no semver update-type, never does.
+      - name: Enable auto-merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          BASE: ${{ github.event.pull_request.base.ref }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          UPDATE_TYPE: ${{ steps.metadata.outputs.update-type }}
+        run: |
+          set -euo pipefail
+
+          case "$UPDATE_TYPE" in
+            version-update:semver-minor|version-update:semver-patch) ;;
+            *)
+              echo "::notice::Skipping auto-merge: update-type is '${UPDATE_TYPE:-none}', only minor and patch updates are auto-merged."
+              exit 0
+              ;;
+          esac
+
+          # `gh pr merge --auto` on a branch with no required status check merges at once, before
+          # CI has run. Refuse unless the base branch requires at least one check, through branch
+          # protection or a ruleset. An API failure fails this step, so nothing is merged.
+          protection=$(gh api "repos/$REPO/branches/$BASE" \
+            --jq 'if .protection.required_status_checks.enforcement_level == "off" then 0
+                  else (.protection.required_status_checks.contexts // [] | length) end')
+          rulesets=$(gh api --paginate "repos/$REPO/rules/branches/$BASE" \
+            --jq '.[] | select(.type == "required_status_checks")
+                  | .parameters.required_status_checks | length' | awk '{ n += $1 } END { print n + 0 }')
+
+          if [ "$protection" -eq 0 ] && [ "$rulesets" -eq 0 ]; then
+            echo "::warning::Skipping auto-merge: '$BASE' has no required status check, so auto-merge would merge before CI."
+            exit 0
+          fi
+
+          echo "Required checks on '$BASE': $protection from branch protection, $rulesets from rulesets."
+          gh pr merge --auto --squash "$PR_URL"

@@ -1,0 +1,15 @@
+name: Stale pull requests
+
+on:
+  pull_request: # TEMPORARY: exercises the reusable workflow from this branch; removed before merge
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+jobs:
+  stale:
+    uses: ./.github/workflows/stale-prs.yml
+    permissions:
+      actions: write
+      issues: write
+      pull-requests: write

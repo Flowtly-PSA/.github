@@ -41,6 +41,13 @@ log, when the base branch has no required status check in branch protection or a
 The repository must allow auto-merge (Settings, General, "Allow auto-merge"), or the merge step
 fails.
 
+After enabling auto-merge the job waits (up to about an hour) for the merge, then dispatches each
+deploy workflow the push would have run. A merge made with `GITHUB_TOKEN` creates no push run, so
+without this step the default branch moves and production does not (flowtly-orchestration#947).
+`workflow_dispatch` is exempt from that rule, so the deploy workflow must declare
+`workflow_dispatch:` among its triggers, and the caller must grant `actions: write`. Without either,
+auto-merge still works and the run log carries a warning naming what is missing.
+
 `.github/workflows/dependabot-auto-merge.yml` in the adopting repository:
 
 ```yaml
@@ -55,6 +62,7 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
+      actions: write
 ```
 
 ## `dependabot.yml` template

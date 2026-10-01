@@ -8,7 +8,7 @@ repository adopts one by adding the small caller below, unchanged. Both reusable
 
 `stale-prs.yml` marks a pull request `stale` after 14 days without activity and closes it 16 days
 later, about 30 days in all. Any new activity removes the label. The `keep-open` label exempts a
-pull request. Branches are never deleted, so a closed pull request can be reopened. Issues are not
+pull request, as do drafts and Dependabot pull requests (label `dependencies`). Branches are never deleted, so a closed pull request can be reopened. Issues are not
 touched.
 
 `.github/workflows/stale.yml` in the adopting repository:

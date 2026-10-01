@@ -28,7 +28,12 @@ jobs:
           days-before-pr-stale: 14
           days-before-pr-close: 16
           stale-pr-label: stale
-          exempt-pr-labels: keep-open
+          # `dependencies` is the label Dependabot puts on every pull request it opens. A major-group
+          # bump waits for a human and was being closed after ~30 days; Dependabot already closes
+          # and supersedes its own pull requests, so the stale timer adds nothing there.
+          exempt-pr-labels: keep-open,dependencies
+          # A draft is unfinished on purpose; closing it for inactivity loses work in progress.
+          exempt-draft-pr: true
           remove-pr-stale-when-updated: true
           delete-branch: false
           operations-per-run: 100

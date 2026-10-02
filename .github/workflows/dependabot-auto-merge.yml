@@ -8,6 +8,9 @@ on:
 permissions:
   contents: write
   pull-requests: write
+  # Dispatches the deploy after the merge (below). A caller that grants only the two scopes above
+  # still gets auto-merge; the dispatch then warns that it was refused and changes nothing.
+  actions: write
 
 jobs:
   auto-merge:
@@ -15,7 +18,9 @@ jobs:
     # ubuntu-* rather than the self-hosted fleet: this job calls `gh`, which the fleet does not
     # ship (flowtly-global docs/RUNNERS.md, toolchain gaps). It runs for a few seconds.
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    # Most of this is waiting for the merge so the deploy can follow it (see the last step).
+    # GitHub-hosted minutes, not the self-hosted fleet.
+    timeout-minutes: 60
     concurrency:
       group: dependabot-auto-merge-${{ github.repository }}-${{ github.event.pull_request.number }}
       cancel-in-progress: true
@@ -27,6 +32,7 @@ jobs:
       # qualifies only when every update in it is minor or patch. A security update qualifies on
       # the same terms; a semver-major one, or one with no semver update-type, never does.
       - name: Enable auto-merge
+        id: enable
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
@@ -61,3 +67,162 @@ jobs:
 
           echo "Required checks on '$BASE': $protection from branch protection, $rulesets from rulesets."
           gh pr merge --auto --squash "$PR_URL"
+          echo "enabled=true" >> "$GITHUB_OUTPUT"
+
+      # THE MERGE ABOVE SHIPS NOTHING ON ITS OWN (flowtly-orchestration#947). Auto-merge was enabled
+      # with GITHUB_TOKEN, so the merge is made by github-actions[bot], and GitHub creates no workflow
+      # run for a push made that way. The default branch moves, no deploy runs, production never gets
+      # the commit, and the merge gate then refuses every later pull request in the repository.
+      #
+      # workflow_dispatch IS an exception to that recursion guard (probed 2026-10-01: assetly.pl run
+      # 36829156165, event workflow_dispatch, triggering_actor github-actions[bot]). So this step waits
+      # for the merge and dispatches each deploy workflow that the push WOULD have triggered, at the
+      # branch ref (never a re-run, which would replay an older tree).
+      #
+      # The `closed` event cannot carry this: it comes from the same GITHUB_TOKEN merge, so it is
+      # suppressed the same way, and callers do not subscribe to it. The job that asked for the merge
+      # is the only thing guaranteed to be around when it happens.
+      #
+      # It never fails the job once the merge has happened. Anything it cannot decide is a warning, and
+      # ~/bin/deploy-dispatch.sh on the fleet remains the backstop for a HEAD with no deploy run.
+      - name: Deploy after the merge
+        if: steps.enable.outputs.enabled == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          BASE: ${{ github.event.pull_request.base.ref }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -uo pipefail
+
+          # Wait for the merge. A later push to the pull request cancels this run (concurrency
+          # above), and the run that replaces it waits instead.
+          merged_sha=""
+          for _ in $(seq 1 110); do
+            read -r state merged_by sha < <(gh pr view "$PR_URL" --json state,mergedBy,mergeCommit \
+              --jq '[.state, (.mergedBy.login // "-"), (.mergeCommit.oid // "-")] | join(" ")') || true
+            case "${state:-}" in
+              MERGED) merged_sha="$sha"; break ;;
+              CLOSED) echo "::notice::Closed without merging; nothing to deploy."; exit 0 ;;
+            esac
+            sleep 30
+          done
+          if [ -z "$merged_sha" ]; then
+            echo "::warning::Not merged within the wait; no deploy dispatched. The fleet's deploy-dispatch.sh covers a HEAD left without a deploy run."
+            exit 0
+          fi
+          # Only a GITHUB_TOKEN merge suppresses the push run. A person or a merge queue merging it
+          # produced a push run already, and dispatching again would deploy twice.
+          case "$merged_by" in
+            github-actions|github-actions\[bot\]|app/github-actions) ;;
+            *) echo "::notice::Merged by '$merged_by', whose push creates its own deploy run; nothing to do."; exit 0 ;;
+          esac
+          echo "Merged as $merged_sha by $merged_by."
+
+          head=$(gh api "repos/$REPO/branches/$BASE" --jq .commit.sha) || { echo "::warning::Could not read $BASE HEAD; no deploy dispatched."; exit 0; }
+          if [ "$head" != "$merged_sha" ]; then
+            echo "::notice::$BASE has moved past $merged_sha to $head; the commit that moved it owns the deploy."
+            exit 0
+          fi
+
+          work=$(mktemp -d)
+          gh api "repos/$REPO/pulls/$PR_NUMBER/files" --paginate --jq '.[].filename' > "$work/changed" \
+            || { echo "::warning::Could not read the changed files; no deploy dispatched."; exit 0; }
+          gh api "repos/$REPO/contents/.github/workflows?ref=$merged_sha" --jq '.[] | select(.type == "file") | .name' > "$work/workflows" \
+            || { echo "::warning::Could not list workflows; no deploy dispatched."; exit 0; }
+
+          dispatched=0
+          while read -r wf; do
+            case "$wf" in *.yml|*.yaml) ;; *) continue ;; esac
+            gh api "repos/$REPO/contents/.github/workflows/$wf?ref=$merged_sha" --jq .content | base64 -d > "$work/wf" 2>/dev/null || continue
+            # Same rule GitHub applies to a push, computed at the merged commit. Prints
+            # TRIGGERS / IGNORED / UNKNOWN <why>, then DISPATCHABLE or NOT_DISPATCHABLE.
+            verdict=$(python3 - "$BASE" "$work/wf" "$work/changed" <<'PY'
+          import re, sys, yaml
+          branch, wf, changed = sys.argv[1], sys.argv[2], open(sys.argv[3]).read().split()
+          def out(v, d=False):
+              print(v); print("DISPATCHABLE" if d else "NOT_DISPATCHABLE"); sys.exit(0)
+          def rx(p):
+              if any(c in p for c in "![]+"): return None
+              p = p.replace("**/", "\0"); o = []; i = 0
+              while i < len(p):
+                  c = p[i]
+                  if c == "\0": o.append("(?:.*/)?")
+                  elif c == "*":
+                      if p[i+1:i+2] == "*": o.append(".*"); i += 1
+                      else: o.append("[^/]*")
+                  elif c == "?": o.append("[^/]")
+                  else: o.append(re.escape(c))
+                  i += 1
+              return "".join(o)
+          def any_match(f, pats):
+              unsup = False
+              for p in pats:
+                  r = rx(str(p))
+                  if r is None: unsup = True; continue
+                  if re.fullmatch(r, f): return True
+              return None if unsup else False
+          try: doc = yaml.safe_load(open(wf))
+          except Exception: out("UNKNOWN unparseable")
+          if not isinstance(doc, dict): out("UNKNOWN not a mapping")
+          on = doc.get("on", doc.get(True))
+          if isinstance(on, str): on = {on: None}
+          if isinstance(on, list): on = {k: None for k in on}
+          if not isinstance(on, dict) or "push" not in on: out("IGNORED")
+          disp = "workflow_dispatch" in on
+          push = on.get("push")
+          if not isinstance(push, dict): out("TRIGGERS", disp)
+          if push.get("branches-ignore") is not None or push.get("tags") is not None and push.get("branches") is None:
+              out("UNKNOWN branch filter", disp)
+          br = push.get("branches")
+          if br is not None:
+              hit = False
+              for b in br:
+                  r = rx(str(b))
+                  if r is None: out("UNKNOWN branch pattern", disp)
+                  if re.fullmatch(r, branch): hit = True
+              if not hit: out("IGNORED", disp)
+          paths, ign = push.get("paths"), push.get("paths-ignore")
+          if paths is not None:
+              for f in changed:
+                  m = any_match(f, paths)
+                  if m is None: out("UNKNOWN paths pattern", disp)
+                  if m: out("TRIGGERS", disp)
+              out("IGNORED", disp)
+          if ign is not None:
+              for f in changed:
+                  m = any_match(f, ign)
+                  if m is None: out("UNKNOWN paths-ignore pattern", disp)
+                  if not m: out("TRIGGERS", disp)
+              out("IGNORED", disp)
+          out("TRIGGERS", disp)
+          PY
+            ) || verdict="UNKNOWN evaluator failed"
+            due=$(printf '%s\n' "$verdict" | sed -n 1p)
+            can=$(printf '%s\n' "$verdict" | sed -n 2p)
+            [ "$due" = IGNORED ] && continue
+            if [ "${due%% *}" = UNKNOWN ]; then
+              echo "::warning::$wf: cannot tell whether the push would have run it (${due#UNKNOWN }); not dispatched."
+              continue
+            fi
+            # Every push-triggered workflow would have run, not only deploys, but only a deploy
+            # leaves production behind; CI on the default branch is advisory here.
+            case "$wf" in *deploy*|*publish*|*release*) ;; *) continue ;; esac
+            if [ "$can" != DISPATCHABLE ]; then
+              echo "::warning::$wf was due but declares no workflow_dispatch, so it cannot be started; $BASE is undeployed until it is. Add 'workflow_dispatch:' to its triggers."
+              continue
+            fi
+            n=$(gh api "repos/$REPO/actions/workflows/$wf/runs?head_sha=$merged_sha" --jq .total_count 2>/dev/null || echo "?")
+            if [ "$n" != 0 ]; then
+              echo "::notice::$wf: ${n} run(s) already at $merged_sha (or unreadable); not dispatching."
+              continue
+            fi
+            if gh workflow run "$wf" --repo "$REPO" --ref "$BASE"; then
+              echo "Dispatched $wf at $BASE ($merged_sha)."
+              dispatched=$((dispatched + 1))
+            else
+              echo "::warning::$wf: dispatch refused. If this is a 403, the caller must grant 'actions: write' (WORKFLOWS.md)."
+            fi
+          done < "$work/workflows"
+          echo "Deploy workflows dispatched: $dispatched."

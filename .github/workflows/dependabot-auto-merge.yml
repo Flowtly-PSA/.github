@@ -1,6 +1,10 @@
-# Reusable: enable auto-merge on Dependabot pull requests that are minor or patch updates.
-# Every setting lives here; callers only wire the pull_request event. See WORKFLOWS.md.
-name: Dependabot auto-merge
+# Reusable: enable auto-merge (squash) on Dependabot minor and patch updates, and on every
+# non-draft pull request a trusted author (OWNER, MEMBER, COLLABORATOR) opens from a branch of the
+# same repository, except steward/* branches and promotions (a `preprod` or `promote/*` head,
+# which /flowtly:release merges as a merge commit). Converting a pull request to draft disables its
+# auto-merge. Every setting lives here; callers only wire the pull_request event. See WORKFLOWS.md.
+# The file keeps its old name because every caller and the `auto-merge / auto-merge` check use it.
+name: Auto-merge
 
 on:
   workflow_call:
@@ -14,7 +18,22 @@ permissions:
 
 jobs:
   auto-merge:
-    if: github.actor == 'dependabot[bot]' && github.event.pull_request.draft == false
+    # Two paths. Dependabot: unchanged. Trusted author: author_association, not github.actor,
+    # because a push by someone else changes the actor but not who opened the pull request. A fork
+    # head never qualifies, and steward/* heads are left to steward, which merges them itself
+    # (flowtly-orchestration#1456), and a preprod or promote/* head is a promotion that
+    # /flowtly:release merges as a merge commit. converted_to_draft is admitted on the same terms so that
+    # draft keeps meaning "do not merge".
+    if: >-
+      (github.actor == 'dependabot[bot]' && github.event.pull_request.draft == false)
+      || (github.event.pull_request.head.repo.full_name == github.repository
+          && !startsWith(github.event.pull_request.head.ref, 'steward/')
+          && github.event.pull_request.head.ref != 'preprod'
+          && !startsWith(github.event.pull_request.head.ref, 'promote/')
+          && (github.event.action == 'converted_to_draft'
+              || (github.event.pull_request.draft == false
+                  && github.event.pull_request.user.login != 'dependabot[bot]'
+                  && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association))))
     # ubuntu-* rather than the self-hosted fleet: this job calls `gh`, which the fleet does not
     # ship (flowtly-global docs/RUNNERS.md, toolchain gaps). It runs for a few seconds.
     runs-on: ubuntu-latest
@@ -25,7 +44,22 @@ jobs:
       group: dependabot-auto-merge-${{ github.repository }}-${{ github.event.pull_request.number }}
       cancel-in-progress: true
     steps:
+      # Whoever armed it (this workflow, the fleet, a person), a draft must not merge on ready.
+      - name: Disable auto-merge on a draft
+        if: github.event.action == 'converted_to_draft'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          set -euo pipefail
+          if [ -n "$(gh pr view "$PR_URL" --json autoMergeRequest --jq '.autoMergeRequest // empty')" ]; then
+            gh pr merge --disable-auto "$PR_URL"
+          else
+            echo "Auto-merge was not enabled; nothing to disable."
+          fi
+
       - id: metadata
+        if: github.actor == 'dependabot[bot]'
         uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
 
       # update-type is the highest semver change in the pull request, so a grouped pull request
@@ -33,22 +67,38 @@ jobs:
       # the same terms; a semver-major one, or one with no semver update-type, never does.
       - name: Enable auto-merge
         id: enable
+        if: github.event.action != 'converted_to_draft'
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           BASE: ${{ github.event.pull_request.base.ref }}
           PR_URL: ${{ github.event.pull_request.html_url }}
           UPDATE_TYPE: ${{ steps.metadata.outputs.update-type }}
+          DEPENDABOT: ${{ github.actor == 'dependabot[bot]' }}
         run: |
           set -euo pipefail
 
-          case "$UPDATE_TYPE" in
-            version-update:semver-minor|version-update:semver-patch) ;;
-            *)
-              echo "::notice::Skipping auto-merge: update-type is '${UPDATE_TYPE:-none}', only minor and patch updates are auto-merged."
-              exit 0
-              ;;
-          esac
+          if [ "$DEPENDABOT" = true ]; then
+            case "$UPDATE_TYPE" in
+              version-update:semver-minor|version-update:semver-patch) ;;
+              *)
+                echo "::notice::Skipping auto-merge: update-type is '${UPDATE_TYPE:-none}', only minor and patch updates are auto-merged."
+                exit 0
+                ;;
+            esac
+          fi
+
+          # The event payload can be older than the pull request: never arm a draft, and disarm one
+          # that a reordered run left armed.
+          # Assigned first so that an API failure fails the step (set -e) instead of reading empty.
+          live=$(gh pr view "$PR_URL" --json isDraft,autoMergeRequest \
+            --jq '[.isDraft, (.autoMergeRequest != null)] | map(tostring) | join(" ")')
+          read -r draft armed <<< "$live"
+          if [ "$draft" = true ]; then
+            [ "$armed" = true ] && gh pr merge --disable-auto "$PR_URL"
+            echo "::notice::Skipping auto-merge: the pull request is a draft."
+            exit 0
+          fi
 
           # `gh pr merge --auto` on a branch with no required status check merges at once, before
           # CI has run. Refuse unless the base branch requires at least one check, through branch
@@ -66,6 +116,21 @@ jobs:
           fi
 
           echo "Required checks on '$BASE': $protection from branch protection, $rulesets from rulesets."
+
+          # A CI job skipped while the pull request was a draft reports success, which satisfies a
+          # required check. On ready_for_review the PR can then be CLEAN before CI has run on it, and
+          # auto-merge would merge at once. So on the trusted path, refuse that while any check on
+          # the head is skipped; a later push arms it. Dependabot pull requests are never drafts.
+          if [ "$DEPENDABOT" != true ]; then
+            live=$(gh pr view "$PR_URL" --json mergeStateStatus,statusCheckRollup \
+              --jq '[.mergeStateStatus, ([.statusCheckRollup[] | select(.conclusion == "SKIPPED")] | length | tostring)] | join(" ")')
+            read -r merge_state skipped <<< "$live"
+            # gh merges at once, not on CI, in any of these three states.
+            if [[ "$merge_state" =~ ^(CLEAN|HAS_HOOKS|UNSTABLE)$ ]] && [ "$skipped" -gt 0 ]; then
+              echo "::warning::Skipping auto-merge: mergeable now with $skipped skipped check(s), so CI may not have run on this head. Push again to arm it."
+              exit 0
+            fi
+          fi
           gh pr merge --auto --squash "$PR_URL"
           echo "enabled=true" >> "$GITHUB_OUTPUT"
 
@@ -93,52 +158,15 @@ jobs:
           BASE: ${{ github.event.pull_request.base.ref }}
           PR_URL: ${{ github.event.pull_request.html_url }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -uo pipefail
 
-          # Wait for the merge. A later push to the pull request cancels this run (concurrency
-          # above), and the run that replaces it waits instead.
-          merged_sha=""
-          for _ in $(seq 1 110); do
-            read -r state merged_by sha < <(gh pr view "$PR_URL" --json state,mergedBy,mergeCommit \
-              --jq '[.state, (.mergedBy.login // "-"), (.mergeCommit.oid // "-")] | join(" ")') || true
-            case "${state:-}" in
-              MERGED) merged_sha="$sha"; break ;;
-              CLOSED) echo "::notice::Closed without merging; nothing to deploy."; exit 0 ;;
-            esac
-            sleep 30
-          done
-          if [ -z "$merged_sha" ]; then
-            echo "::warning::Not merged within the wait; no deploy dispatched. The fleet's deploy-dispatch.sh covers a HEAD left without a deploy run."
-            exit 0
-          fi
-          # Only a GITHUB_TOKEN merge suppresses the push run. A person or a merge queue merging it
-          # produced a push run already, and dispatching again would deploy twice.
-          case "$merged_by" in
-            github-actions|github-actions\[bot\]|app/github-actions) ;;
-            *) echo "::notice::Merged by '$merged_by', whose push creates its own deploy run; nothing to do."; exit 0 ;;
-          esac
-          echo "Merged as $merged_sha by $merged_by."
-
-          head=$(gh api "repos/$REPO/branches/$BASE" --jq .commit.sha) || { echo "::warning::Could not read $BASE HEAD; no deploy dispatched."; exit 0; }
-          if [ "$head" != "$merged_sha" ]; then
-            echo "::notice::$BASE has moved past $merged_sha to $head; the commit that moved it owns the deploy."
-            exit 0
-          fi
-
+          # The push rule, written once so the check before the wait and the dispatch after the merge
+          # apply the same one. Prints TRIGGERS / IGNORED / UNKNOWN <why>, then DISPATCHABLE or
+          # NOT_DISPATCHABLE.
           work=$(mktemp -d)
-          gh api "repos/$REPO/pulls/$PR_NUMBER/files" --paginate --jq '.[].filename' > "$work/changed" \
-            || { echo "::warning::Could not read the changed files; no deploy dispatched."; exit 0; }
-          gh api "repos/$REPO/contents/.github/workflows?ref=$merged_sha" --jq '.[] | select(.type == "file") | .name' > "$work/workflows" \
-            || { echo "::warning::Could not list workflows; no deploy dispatched."; exit 0; }
-
-          dispatched=0
-          while read -r wf; do
-            case "$wf" in *.yml|*.yaml) ;; *) continue ;; esac
-            gh api "repos/$REPO/contents/.github/workflows/$wf?ref=$merged_sha" --jq .content | base64 -d > "$work/wf" 2>/dev/null || continue
-            # Same rule GitHub applies to a push, computed at the merged commit. Prints
-            # TRIGGERS / IGNORED / UNKNOWN <why>, then DISPATCHABLE or NOT_DISPATCHABLE.
-            verdict=$(python3 - "$BASE" "$work/wf" "$work/changed" <<'PY'
+          cat > "$work/eval.py" <<'PY'
           import re, sys, yaml
           branch, wf, changed = sys.argv[1], sys.argv[2], open(sys.argv[3]).read().split()
           def out(v, d=False):
@@ -198,7 +226,73 @@ jobs:
               out("IGNORED", disp)
           out("TRIGGERS", disp)
           PY
-            ) || verdict="UNKNOWN evaluator failed"
+
+          # Waiting holds a billed runner until the merge, so wait only when a deploy workflow would
+          # run: the rule below, on this pull request's files, at the base and at the head. Anything
+          # it cannot read or decide counts as "would run".
+          due_deploy() {
+            local ref=$1 wf
+            gh api "repos/$REPO/contents/.github/workflows?ref=$ref" --jq '.[] | select(.type == "file") | .name' > "$work/pre" \
+              || { echo "?"; return; }
+            while read -r wf; do
+              case "$wf" in *.yml|*.yaml) ;; *) continue ;; esac
+              case "$wf" in *deploy*|*publish*|*release*) ;; *) continue ;; esac
+              gh api "repos/$REPO/contents/.github/workflows/$wf?ref=$ref" --jq .content | base64 -d > "$work/prewf" 2>/dev/null \
+                || { echo "$wf"; continue; }
+              [ "$(python3 "$work/eval.py" "$BASE" "$work/prewf" "$work/changed" | sed -n 1p)" = IGNORED ] || echo "$wf"
+            done < "$work/pre"
+          }
+          if gh api "repos/$REPO/pulls/$PR_NUMBER/files" --paginate --jq '.[].filename' > "$work/changed"; then
+            due=$(due_deploy "$BASE"; due_deploy "$HEAD_SHA")
+            if [ -z "$due" ]; then
+              echo "::notice::No deploy workflow would run on this merge; not waiting for it."
+              exit 0
+            fi
+            echo "Waiting for the merge, because of: $(printf '%s\n' "$due" | sort -u | paste -sd' ')"
+          fi
+
+          # Wait for the merge. A later push to the pull request cancels this run (concurrency
+          # above), and the run that replaces it waits instead.
+          merged_sha=""
+          for _ in $(seq 1 110); do
+            read -r state merged_by sha < <(gh pr view "$PR_URL" --json state,mergedBy,mergeCommit \
+              --jq '[.state, (.mergedBy.login // "-"), (.mergeCommit.oid // "-")] | join(" ")') || true
+            case "${state:-}" in
+              MERGED) merged_sha="$sha"; break ;;
+              CLOSED) echo "::notice::Closed without merging; nothing to deploy."; exit 0 ;;
+            esac
+            sleep 30
+          done
+          if [ -z "$merged_sha" ]; then
+            echo "::warning::Not merged within the wait; no deploy dispatched. The fleet's deploy-dispatch.sh covers a HEAD left without a deploy run."
+            exit 0
+          fi
+          # Only a GITHUB_TOKEN merge suppresses the push run. A person or a merge queue merging it
+          # produced a push run already, and dispatching again would deploy twice.
+          case "$merged_by" in
+            github-actions|github-actions\[bot\]|app/github-actions) ;;
+            *) echo "::notice::Merged by '$merged_by', whose push creates its own deploy run; nothing to do."; exit 0 ;;
+          esac
+          echo "Merged as $merged_sha by $merged_by."
+
+          head=$(gh api "repos/$REPO/branches/$BASE" --jq .commit.sha) || { echo "::warning::Could not read $BASE HEAD; no deploy dispatched."; exit 0; }
+          if [ "$head" != "$merged_sha" ]; then
+            echo "::notice::$BASE has moved past $merged_sha to $head; the commit that moved it owns the deploy."
+            exit 0
+          fi
+
+          gh api "repos/$REPO/pulls/$PR_NUMBER/files" --paginate --jq '.[].filename' > "$work/changed" \
+            || { echo "::warning::Could not read the changed files; no deploy dispatched."; exit 0; }
+          gh api "repos/$REPO/contents/.github/workflows?ref=$merged_sha" --jq '.[] | select(.type == "file") | .name' > "$work/workflows" \
+            || { echo "::warning::Could not list workflows; no deploy dispatched."; exit 0; }
+
+          dispatched=0
+          while read -r wf; do
+            case "$wf" in *.yml|*.yaml) ;; *) continue ;; esac
+            gh api "repos/$REPO/contents/.github/workflows/$wf?ref=$merged_sha" --jq .content | base64 -d > "$work/wf" 2>/dev/null || continue
+            # Same rule GitHub applies to a push, computed at the merged commit. Prints
+            # TRIGGERS / IGNORED / UNKNOWN <why>, then DISPATCHABLE or NOT_DISPATCHABLE.
+            verdict=$(python3 "$work/eval.py" "$BASE" "$work/wf" "$work/changed") || verdict="UNKNOWN evaluator failed"
             due=$(printf '%s\n' "$verdict" | sed -n 1p)
             can=$(printf '%s\n' "$verdict" | sed -n 2p)
             [ "$due" = IGNORED ] && continue

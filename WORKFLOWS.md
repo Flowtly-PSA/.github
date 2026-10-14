@@ -43,7 +43,15 @@ kinds of pull request:
 
 Converting a pull request to draft disables its auto-merge, so draft means "do not merge". It refuses,
 with a warning in the run log, when the base branch has no required status check in branch protection
-or a ruleset, because `gh pr merge --auto` would then merge at once, before CI.
+or a ruleset, because `gh pr merge --auto` would then merge at once, before CI. On the trusted path
+it also refuses a pull request that is already mergeable while a check on its head was skipped (CI
+skipped while it was a draft); the next push arms it. Every armed pull request holds an
+`ubuntu-latest` job until it merges, up to about an hour, which is billed.
+
+Auto-merge adds no privilege: no base branch requires an approving review, so anyone with write access
+could already merge a green pull request by hand. It does make that silent: a push by another writer to
+an armed pull request merges on green without the author seeing it. Where that is not acceptable,
+require approving reviews on the base branch; auto-merge then waits for them.
 
 The repository must allow auto-merge (Settings, General, "Allow auto-merge"), or the merge step
 fails.

@@ -84,8 +84,14 @@ jobs:
             esac
           fi
 
-          # The event payload can be older than the pull request: never arm a draft.
-          if [ "$(gh pr view "$PR_URL" --json isDraft --jq .isDraft)" = true ]; then
+          # The event payload can be older than the pull request: never arm a draft, and disarm one
+          # that a reordered run left armed.
+          # Assigned first so that an API failure fails the step (set -e) instead of reading empty.
+          live=$(gh pr view "$PR_URL" --json isDraft,autoMergeRequest \
+            --jq '[.isDraft, (.autoMergeRequest != null)] | map(tostring) | join(" ")')
+          read -r draft armed <<< "$live"
+          if [ "$draft" = true ]; then
+            [ "$armed" = true ] && gh pr merge --disable-auto "$PR_URL"
             echo "::notice::Skipping auto-merge: the pull request is a draft."
             exit 0
           fi
@@ -106,6 +112,21 @@ jobs:
           fi
 
           echo "Required checks on '$BASE': $protection from branch protection, $rulesets from rulesets."
+
+          # A CI job skipped while the pull request was a draft reports success, which satisfies a
+          # required check. On ready_for_review the PR can then be CLEAN before CI has run on it, and
+          # auto-merge would merge at once. So on the trusted path, refuse that while any check on
+          # the head is skipped; a later push arms it. Dependabot pull requests are never drafts.
+          if [ "$DEPENDABOT" != true ]; then
+            live=$(gh pr view "$PR_URL" --json mergeStateStatus,statusCheckRollup \
+              --jq '[.mergeStateStatus, ([.statusCheckRollup[] | select(.conclusion == "SKIPPED")] | length | tostring)] | join(" ")')
+            read -r merge_state skipped <<< "$live"
+            # gh merges at once, not on CI, in any of these three states.
+            if [[ "$merge_state" =~ ^(CLEAN|HAS_HOOKS|UNSTABLE)$ ]] && [ "$skipped" -gt 0 ]; then
+              echo "::warning::Skipping auto-merge: mergeable now with $skipped skipped check(s), so CI may not have run on this head. Push again to arm it."
+              exit 0
+            fi
+          fi
           gh pr merge --auto --squash "$PR_URL"
           echo "enabled=true" >> "$GITHUB_OUTPUT"
 

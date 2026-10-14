@@ -24,13 +24,12 @@ jobs:
     # Two paths. Dependabot: unchanged. Trusted author: the pull request's author, not
     # github.actor, because a push by someone else changes the actor but not who opened it. Trust
     # is the author's live permission on the repository, read in the step below, not the payload's
-    # author_association: for a member whose org membership is private, the payload carries
-    # COLLABORATOR only where they are a direct collaborator and something untrusted elsewhere, so
-    # the path never ran in most repositories. A bot author never qualifies, as before: an App
-    # was never OWNER, MEMBER or COLLABORATOR. A fork
+    # author_association, which did not show the trust REST showed: the owner, whose org
+    # membership is private and who is MEMBER over REST, had the path skipped in every repository
+    # where he is not a direct collaborator (flowtly-plugin#214). A bot author never qualifies. A fork
     # head never qualifies, and steward/* heads are left to steward, which merges them itself
     # (flowtly-orchestration#1456), and a preprod or promote/* head is a promotion that
-    # /flowtly:release merges as a merge commit. converted_to_draft is admitted on the same terms so that
+    # /flowtly:release merges as a merge commit. converted_to_draft is admitted for any author so that
     # draft keeps meaning "do not merge".
     if: >-
       (github.actor == 'dependabot[bot]' && github.event.pull_request.draft == false)
@@ -88,13 +87,10 @@ jobs:
           set -euo pipefail
 
           # Trusted path: the author must hold write, maintain or admin on this repository now,
-          # however it was granted (direct, team, org base permission). Any API failure but a 404
-          # (no access at all) fails the step, so nothing is armed.
+          # however it was granted (direct, team, org base permission). A user with no access reads
+          # as 'none'; any API failure fails the step, so nothing is armed and the failure shows.
           if [ "$DEPENDABOT" != true ]; then
-            if ! perm=$(gh api "repos/$REPO/collaborators/$AUTHOR/permission" --jq .permission 2> "$RUNNER_TEMP/perm.err"); then
-              grep -q "HTTP 404" "$RUNNER_TEMP/perm.err" || { cat "$RUNNER_TEMP/perm.err" >&2; exit 1; }
-              perm=none
-            fi
+            perm=$(gh api "repos/$REPO/collaborators/$AUTHOR/permission" --jq .permission)
             case "$perm" in
               admin|write) ;;
               *)

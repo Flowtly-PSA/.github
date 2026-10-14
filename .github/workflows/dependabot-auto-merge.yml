@@ -1,6 +1,9 @@
-# Reusable: enable auto-merge on Dependabot pull requests that are minor or patch updates.
-# Every setting lives here; callers only wire the pull_request event. See WORKFLOWS.md.
-name: Dependabot auto-merge
+# Reusable: enable auto-merge (squash) on Dependabot minor and patch updates, and on every
+# non-draft pull request a trusted author (OWNER, MEMBER, COLLABORATOR) opens from a branch of the
+# same repository, except steward/* branches. Converting a pull request to draft disables its
+# auto-merge. Every setting lives here; callers only wire the pull_request event. See WORKFLOWS.md.
+# The file keeps its old name because every caller and the `auto-merge / auto-merge` check use it.
+name: Auto-merge
 
 on:
   workflow_call:
@@ -14,7 +17,19 @@ permissions:
 
 jobs:
   auto-merge:
-    if: github.actor == 'dependabot[bot]' && github.event.pull_request.draft == false
+    # Two paths. Dependabot: unchanged. Trusted author: author_association, not github.actor,
+    # because a push by someone else changes the actor but not who opened the pull request. A fork
+    # head never qualifies, and steward/* heads are left to steward, which merges them itself
+    # (flowtly-orchestration#1456). converted_to_draft is admitted on the same terms so that
+    # draft keeps meaning "do not merge".
+    if: >-
+      (github.actor == 'dependabot[bot]' && github.event.pull_request.draft == false)
+      || (github.event.pull_request.head.repo.full_name == github.repository
+          && !startsWith(github.event.pull_request.head.ref, 'steward/')
+          && (github.event.action == 'converted_to_draft'
+              || (github.event.pull_request.draft == false
+                  && github.event.pull_request.user.login != 'dependabot[bot]'
+                  && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association))))
     # ubuntu-* rather than the self-hosted fleet: this job calls `gh`, which the fleet does not
     # ship (flowtly-global docs/RUNNERS.md, toolchain gaps). It runs for a few seconds.
     runs-on: ubuntu-latest
@@ -25,7 +40,22 @@ jobs:
       group: dependabot-auto-merge-${{ github.repository }}-${{ github.event.pull_request.number }}
       cancel-in-progress: true
     steps:
+      # Whoever armed it (this workflow, the fleet, a person), a draft must not merge on ready.
+      - name: Disable auto-merge on a draft
+        if: github.event.action == 'converted_to_draft'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          set -euo pipefail
+          if [ -n "$(gh pr view "$PR_URL" --json autoMergeRequest --jq '.autoMergeRequest // empty')" ]; then
+            gh pr merge --disable-auto "$PR_URL"
+          else
+            echo "Auto-merge was not enabled; nothing to disable."
+          fi
+
       - id: metadata
+        if: github.actor == 'dependabot[bot]'
         uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
 
       # update-type is the highest semver change in the pull request, so a grouped pull request
@@ -33,22 +63,32 @@ jobs:
       # the same terms; a semver-major one, or one with no semver update-type, never does.
       - name: Enable auto-merge
         id: enable
+        if: github.event.action != 'converted_to_draft'
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           BASE: ${{ github.event.pull_request.base.ref }}
           PR_URL: ${{ github.event.pull_request.html_url }}
           UPDATE_TYPE: ${{ steps.metadata.outputs.update-type }}
+          DEPENDABOT: ${{ github.actor == 'dependabot[bot]' }}
         run: |
           set -euo pipefail
 
-          case "$UPDATE_TYPE" in
-            version-update:semver-minor|version-update:semver-patch) ;;
-            *)
-              echo "::notice::Skipping auto-merge: update-type is '${UPDATE_TYPE:-none}', only minor and patch updates are auto-merged."
-              exit 0
-              ;;
-          esac
+          if [ "$DEPENDABOT" = true ]; then
+            case "$UPDATE_TYPE" in
+              version-update:semver-minor|version-update:semver-patch) ;;
+              *)
+                echo "::notice::Skipping auto-merge: update-type is '${UPDATE_TYPE:-none}', only minor and patch updates are auto-merged."
+                exit 0
+                ;;
+            esac
+          fi
+
+          # The event payload can be older than the pull request: never arm a draft.
+          if [ "$(gh pr view "$PR_URL" --json isDraft --jq .isDraft)" = true ]; then
+            echo "::notice::Skipping auto-merge: the pull request is a draft."
+            exit 0
+          fi
 
           # `gh pr merge --auto` on a branch with no required status check merges at once, before
           # CI has run. Refuse unless the base branch requires at least one check, through branch

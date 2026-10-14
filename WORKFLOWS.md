@@ -30,13 +30,20 @@ jobs:
       pull-requests: write
 ```
 
-## Dependabot auto-merge
+## Auto-merge
 
-`dependabot-auto-merge.yml` enables auto-merge (squash) on a Dependabot pull request when its
-highest update is minor or patch. That covers security updates and grouped pull requests on the
-same terms; a semver-major update is never auto-merged. It also refuses, with a warning in the run
-log, when the base branch has no required status check in branch protection or a ruleset, because
-`gh pr merge --auto` would then merge at once, before CI.
+`dependabot-auto-merge.yml` (the name predates the second path) enables auto-merge (squash) on two
+kinds of pull request:
+
+- a Dependabot pull request whose highest update is minor or patch. That covers security updates and
+  grouped pull requests on the same terms; a semver-major update is never auto-merged.
+- any other non-draft pull request whose author is OWNER, MEMBER or COLLABORATOR
+  (`author_association`, not whoever pushed last), from a branch of the same repository, except a
+  `steward/*` branch, which steward merges itself.
+
+Converting a pull request to draft disables its auto-merge, so draft means "do not merge". It refuses,
+with a warning in the run log, when the base branch has no required status check in branch protection
+or a ruleset, because `gh pr merge --auto` would then merge at once, before CI.
 
 The repository must allow auto-merge (Settings, General, "Allow auto-merge"), or the merge step
 fails.
@@ -55,6 +62,7 @@ name: Dependabot auto-merge
 
 on:
   pull_request:
+    types: [opened, reopened, synchronize, ready_for_review, converted_to_draft]
 
 jobs:
   auto-merge:

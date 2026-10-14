@@ -1,5 +1,5 @@
 # Reusable: enable auto-merge (squash) on Dependabot minor and patch updates, and on every
-# non-draft pull request a trusted author (OWNER, MEMBER, COLLABORATOR) opens from a branch of the
+# non-draft pull request a trusted author (write access or more, read live) opens from a branch of the
 # same repository, except steward/* branches and promotions (a `preprod` or `promote/*` head,
 # which /flowtly:release merges as a merge commit). It arms only after every workflow run on the
 # head has finished with no failed, cancelled or timed-out job, because GitHub's auto-merge waits for
@@ -21,8 +21,13 @@ permissions:
 
 jobs:
   auto-merge:
-    # Two paths. Dependabot: unchanged. Trusted author: author_association, not github.actor,
-    # because a push by someone else changes the actor but not who opened the pull request. A fork
+    # Two paths. Dependabot: unchanged. Trusted author: the pull request's author, not
+    # github.actor, because a push by someone else changes the actor but not who opened it. Trust
+    # is the author's live permission on the repository, read in the step below, not the payload's
+    # author_association: for a member whose org membership is private, the payload carries
+    # COLLABORATOR only where they are a direct collaborator and something untrusted elsewhere, so
+    # the path never ran in most repositories. A bot author never qualifies, as before: an App
+    # was never OWNER, MEMBER or COLLABORATOR. A fork
     # head never qualifies, and steward/* heads are left to steward, which merges them itself
     # (flowtly-orchestration#1456), and a preprod or promote/* head is a promotion that
     # /flowtly:release merges as a merge commit. converted_to_draft is admitted on the same terms so that
@@ -35,8 +40,7 @@ jobs:
           && !startsWith(github.event.pull_request.head.ref, 'promote/')
           && (github.event.action == 'converted_to_draft'
               || (github.event.pull_request.draft == false
-                  && github.event.pull_request.user.login != 'dependabot[bot]'
-                  && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association))))
+                  && github.event.pull_request.user.type != 'Bot')))
     # ubuntu-* rather than the self-hosted fleet: this job calls `gh`, which the fleet does not
     # ship (flowtly-global docs/RUNNERS.md, toolchain gaps).
     runs-on: ubuntu-latest
@@ -79,8 +83,26 @@ jobs:
           PR_URL: ${{ github.event.pull_request.html_url }}
           UPDATE_TYPE: ${{ steps.metadata.outputs.update-type }}
           DEPENDABOT: ${{ github.actor == 'dependabot[bot]' }}
+          AUTHOR: ${{ github.event.pull_request.user.login }}
         run: |
           set -euo pipefail
+
+          # Trusted path: the author must hold write, maintain or admin on this repository now,
+          # however it was granted (direct, team, org base permission). Any API failure but a 404
+          # (no access at all) fails the step, so nothing is armed.
+          if [ "$DEPENDABOT" != true ]; then
+            if ! perm=$(gh api "repos/$REPO/collaborators/$AUTHOR/permission" --jq .permission 2> "$RUNNER_TEMP/perm.err"); then
+              grep -q "HTTP 404" "$RUNNER_TEMP/perm.err" || { cat "$RUNNER_TEMP/perm.err" >&2; exit 1; }
+              perm=none
+            fi
+            case "$perm" in
+              admin|write) ;;
+              *)
+                echo "::notice::Skipping auto-merge: '$AUTHOR' has '$perm' permission on $REPO, not write."
+                exit 0
+                ;;
+            esac
+          fi
 
           if [ "$DEPENDABOT" = true ]; then
             case "$UPDATE_TYPE" in

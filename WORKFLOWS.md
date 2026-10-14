@@ -37,8 +37,9 @@ kinds of pull request:
 
 - a Dependabot pull request whose highest update is minor or patch. That covers security updates and
   grouped pull requests on the same terms; a semver-major update is never auto-merged.
-- any other non-draft pull request whose author is OWNER, MEMBER or COLLABORATOR
-  (`author_association`, not whoever pushed last), from a branch of the same repository, except a
+- any other non-draft pull request whose author (not whoever pushed last, and not a bot) holds
+  write, maintain or admin on the repository, read live from the API rather than from the event's
+  `author_association`, which hides private org membership; from a branch of the same repository, except a
   `steward/*` branch, which steward merges itself, or a promotion (a `preprod` or
   `promote/*` head), which `/flowtly:release` merges as a merge commit.
 

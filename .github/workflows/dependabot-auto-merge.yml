@@ -12,8 +12,9 @@ on:
 permissions:
   contents: write
   pull-requests: write
-  # Dispatches the deploy after the merge (below). A caller that grants only the two scopes above
-  # still gets auto-merge; the dispatch then warns that it was refused and changes nothing.
+  # Dispatches the deploy after the merge (below), and lets the trusted path count skipped jobs.
+  # A caller that grants only the two scopes above still gets Dependabot auto-merge (the dispatch
+  # warns that it was refused); its trusted-path runs fail closed whenever that count is needed.
   actions: write
 
 jobs:
@@ -121,17 +122,29 @@ jobs:
           # required check. On ready_for_review the PR can then be CLEAN before CI has run on it, and
           # auto-merge would merge at once. So on the trusted path, refuse that while any check on
           # the head is skipped; a later push arms it. Dependabot pull requests are never drafts.
+          # Skipped jobs are counted through the Actions API: statusCheckRollup needs checks:read,
+          # which callers do not grant, while their actions:write covers runs and jobs. Every call is
+          # an assignment, so an API failure fails the step (set -e) and nothing is armed.
           if [ "$DEPENDABOT" != true ]; then
-            live=$(gh pr view "$PR_URL" --json mergeStateStatus,statusCheckRollup \
-              --jq '[.mergeStateStatus, ([.statusCheckRollup[] | select(.conclusion == "SKIPPED")] | length | tostring)] | join(" ")')
-            read -r merge_state skipped <<< "$live"
+            live=$(gh pr view "$PR_URL" --json mergeStateStatus,headRefOid --jq '[.mergeStateStatus, .headRefOid] | join(" ")')
+            read -r merge_state head_sha <<< "$live"
+            skipped=0
             # gh merges at once, not on CI, in any of these three states.
-            if [[ "$merge_state" =~ ^(CLEAN|HAS_HOOKS|UNSTABLE)$ ]] && [ "$skipped" -gt 0 ]; then
+            if [[ "$merge_state" =~ ^(CLEAN|HAS_HOOKS|UNSTABLE)$ ]]; then
+              runs=$(gh api --paginate "repos/$REPO/actions/runs?head_sha=$head_sha&per_page=100" --jq '.workflow_runs[].id')
+              for run in $runs; do
+                n=$(gh api --paginate "repos/$REPO/actions/runs/$run/jobs?filter=latest&per_page=100" \
+                  --jq '[.jobs[] | select(.conclusion == "skipped")] | length' | awk '{ s += $1 } END { print s + 0 }')
+                skipped=$((skipped + n))
+              done
+            fi
+            if [ "$skipped" -gt 0 ]; then
               echo "::warning::Skipping auto-merge: mergeable now with $skipped skipped check(s), so CI may not have run on this head. Push again to arm it."
               exit 0
             fi
           fi
-          gh pr merge --auto --squash "$PR_URL"
+          # On the trusted path, pin the head that was checked: a push in between fails this step.
+          gh pr merge --auto --squash ${head_sha:+--match-head-commit "$head_sha"} "$PR_URL"
           echo "enabled=true" >> "$GITHUB_OUTPUT"
 
       # THE MERGE ABOVE SHIPS NOTHING ON ITS OWN (flowtly-orchestration#947). Auto-merge was enabled

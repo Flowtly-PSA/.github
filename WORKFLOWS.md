@@ -39,8 +39,8 @@ kinds of pull request:
   grouped pull requests on the same terms; a semver-major update is never auto-merged.
 - any other non-draft pull request whose author is OWNER, MEMBER or COLLABORATOR
   (`author_association`, not whoever pushed last), from a branch of the same repository, except a
-  `steward/*` branch, which steward merges itself, or a `preprod` head: a promotion, which
-  `/flowtly:release` merges as a merge commit.
+  `steward/*` branch, which steward merges itself, or a promotion (a `preprod` or
+  `promote/*` head), which `/flowtly:release` merges as a merge commit.
 
 Converting a pull request to draft disables its auto-merge, so draft means "do not merge". It refuses,
 with a warning in the run log, when the base branch has no required status check in branch protection

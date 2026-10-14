@@ -121,12 +121,23 @@ jobs:
           # required check. On ready_for_review the PR can then be CLEAN before CI has run on it, and
           # auto-merge would merge at once. So on the trusted path, refuse that while any check on
           # the head is skipped; a later push arms it. Dependabot pull requests are never drafts.
+          # Skipped jobs are counted through the Actions API: statusCheckRollup needs checks:read,
+          # which callers do not grant, while their actions:write covers runs and jobs. Every call is
+          # an assignment, so an API failure fails the step (set -e) and nothing is armed.
           if [ "$DEPENDABOT" != true ]; then
-            live=$(gh pr view "$PR_URL" --json mergeStateStatus,statusCheckRollup \
-              --jq '[.mergeStateStatus, ([.statusCheckRollup[] | select(.conclusion == "SKIPPED")] | length | tostring)] | join(" ")')
-            read -r merge_state skipped <<< "$live"
+            live=$(gh pr view "$PR_URL" --json mergeStateStatus,headRefOid --jq '[.mergeStateStatus, .headRefOid] | join(" ")')
+            read -r merge_state head_sha <<< "$live"
+            skipped=0
             # gh merges at once, not on CI, in any of these three states.
-            if [[ "$merge_state" =~ ^(CLEAN|HAS_HOOKS|UNSTABLE)$ ]] && [ "$skipped" -gt 0 ]; then
+            if [[ "$merge_state" =~ ^(CLEAN|HAS_HOOKS|UNSTABLE)$ ]]; then
+              runs=$(gh api --paginate "repos/$REPO/actions/runs?head_sha=$head_sha&per_page=100" --jq '.workflow_runs[].id')
+              for run in $runs; do
+                n=$(gh api --paginate "repos/$REPO/actions/runs/$run/jobs?filter=latest&per_page=100" \
+                  --jq '[.jobs[] | select(.conclusion == "skipped")] | length' | awk '{ s += $1 } END { print s + 0 }')
+                skipped=$((skipped + n))
+              done
+            fi
+            if [ "$skipped" -gt 0 ]; then
               echo "::warning::Skipping auto-merge: mergeable now with $skipped skipped check(s), so CI may not have run on this head. Push again to arm it."
               exit 0
             fi

@@ -1,8 +1,10 @@
 # Reusable: enable auto-merge (squash) on Dependabot minor and patch updates, and on every
 # non-draft pull request a trusted author (OWNER, MEMBER, COLLABORATOR) opens from a branch of the
 # same repository, except steward/* branches and promotions (a `preprod` or `promote/*` head,
-# which /flowtly:release merges as a merge commit). Converting a pull request to draft disables its
-# auto-merge. Every setting lives here; callers only wire the pull_request event. See WORKFLOWS.md.
+# which /flowtly:release merges as a merge commit). It arms only after every workflow run on the
+# head has finished with no failed, cancelled or timed-out job, because GitHub's auto-merge waits for
+# required checks only. Converting a pull request to draft disables its auto-merge. Every setting
+# lives here; callers only wire the pull_request event. See WORKFLOWS.md.
 # The file keeps its old name because every caller and the `auto-merge / auto-merge` check use it.
 name: Auto-merge
 
@@ -12,9 +14,9 @@ on:
 permissions:
   contents: write
   pull-requests: write
-  # Dispatches the deploy after the merge (below), and lets the trusted path count skipped jobs.
-  # A caller that grants only the two scopes above still gets Dependabot auto-merge (the dispatch
-  # warns that it was refused); its trusted-path runs fail closed whenever that count is needed.
+  # Reads the workflow runs and jobs on the head before arming, and dispatches the deploy after the
+  # merge (below). A caller that grants only the two scopes above gets no auto-merge: the read
+  # fails and nothing is armed.
   actions: write
 
 jobs:
@@ -36,11 +38,12 @@ jobs:
                   && github.event.pull_request.user.login != 'dependabot[bot]'
                   && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association))))
     # ubuntu-* rather than the self-hosted fleet: this job calls `gh`, which the fleet does not
-    # ship (flowtly-global docs/RUNNERS.md, toolchain gaps). It runs for a few seconds.
+    # ship (flowtly-global docs/RUNNERS.md, toolchain gaps).
     runs-on: ubuntu-latest
-    # Most of this is waiting for the merge so the deploy can follow it (see the last step).
+    # Most of this is waiting: for CI to finish before arming, then for the merge so the deploy can
+    # follow it (see the last step). Each wait is bounded to about an hour.
     # GitHub-hosted minutes, not the self-hosted fleet.
-    timeout-minutes: 60
+    timeout-minutes: 130
     concurrency:
       group: dependabot-auto-merge-${{ github.repository }}-${{ github.event.pull_request.number }}
       cancel-in-progress: true
@@ -143,7 +146,76 @@ jobs:
               exit 0
             fi
           fi
-          # On the trusted path, pin the head that was checked: a push in between fails this step.
+
+          # GitHub's auto-merge waits only for REQUIRED checks: any other check that fails after it
+          # is armed does not stop the merge (the hole flowtly-plugin#214, merged by hand with a red
+          # non-required check, brought to light). So on both paths, arm only once every workflow run on the head has completed and
+          # no job failed, was cancelled or timed out, as steward's merge.py refuses a red check. Each
+          # workflow is judged per event by its newest run that did not skip outright, at its latest
+          # attempt, so a draft-era skip, a run superseded by a newer one, or a re-run attempt is not
+          # the verdict; a push run and a pull_request run of one workflow are both judged. This
+          # workflow's own runs are left out. A red run ends the wait at once.
+          # Commit statuses and other apps' check runs are not seen (callers grant no checks:read).
+          # Every call is an assignment, so an API failure fails the step and nothing is armed. A
+          # push, a draft conversion or a reopen cancels this wait (concurrency above).
+          [ -n "${head_sha:-}" ] || head_sha=$(gh pr view "$PR_URL" --json headRefOid --jq .headRefOid)
+          self_wf=$(gh api "repos/$REPO/actions/runs/$GITHUB_RUN_ID" --jq .workflow_id)
+          # Done when nothing is running in two polls in a row with the same runs, so a run created a
+          # moment late (a workflow_run follow-up) is still waited for.
+          bad='^(failure|cancelled|timed_out|startup_failure|action_required)$'
+          prev="-"
+          deadline=$((SECONDS + 60 * 60))
+          while :; do
+            runs=$(gh api --paginate "repos/$REPO/actions/runs?head_sha=$head_sha&per_page=100" \
+              --jq ".workflow_runs[] | select(.workflow_id != $self_wf)
+                    | [.id, .status, (.conclusion // \"\"), \"\(.workflow_id) \(.event)\", .created_at, .name] | @tsv")
+            # The verdict runs: per workflow and event, the newest one that did not skip outright.
+            judged=$(jq -nRr '[inputs | split("\t") | select(length == 6)
+                | {id: (.[0] | tonumber), s: .[1], c: .[2], k: .[3], at: .[4], n: .[5]}]
+              | group_by(.k) | map(map(select(.c != "skipped")) | max_by([.at, .id]) // empty)
+              | .[] | [.id, .s, .c, .n] | @tsv' <<< "$runs")
+            ids=$(awk '{ print $1 }' <<< "$runs" | sort)
+            red=$(awk -F '\t' -v bad="$bad" '$3 ~ bad { printf "%s (%s); ", $4, $3 }' <<< "$judged")
+            [ -n "$red" ] && break
+            if [ -z "$(awk 'NF && $2 != "completed"' <<< "$runs")" ]; then
+              [ "$ids" = "$prev" ] && break
+              prev=$ids
+            else
+              prev="-"
+            fi
+            if [ "$SECONDS" -ge "$deadline" ]; then
+              echo "::warning::Skipping auto-merge: CI on $head_sha did not finish within an hour. Push again to retry, or merge by hand."
+              exit 0
+            fi
+            sleep 30
+          done
+          if [ -z "$ids" ]; then
+            echo "::warning::Skipping auto-merge: no workflow ran on $head_sha, so there is no CI result to arm on."
+            exit 0
+          fi
+          # Every job of a verdict run, at its latest attempt: a job that failed under
+          # continue-on-error leaves its run green but its check red.
+          if [ -z "$red" ]; then
+            run_ids=$(awk '{ print $1 }' <<< "$judged")
+            for run in $run_ids; do
+              red+=$(gh api --paginate "repos/$REPO/actions/runs/$run/jobs?filter=latest&per_page=100" \
+                --jq '[.jobs[] | select(.conclusion // "" | test("^(failure|cancelled|timed_out)$"))
+                       | "\(.name) (\(.conclusion)); "] | join("")')
+            done
+          fi
+          if [ -n "$red" ]; then
+            echo "::warning::Skipping auto-merge: a check on $head_sha did not pass: ${red%; }. Fix it and push, or merge by hand; a re-run does not re-arm."
+            exit 0
+          fi
+          # The wait can be long: arm only a pull request that is still open and ready.
+          live=$(gh pr view "$PR_URL" --json state,isDraft --jq '[.state, .isDraft] | map(tostring) | join(" ")')
+          read -r state draft <<< "$live"
+          if [ "$state" != OPEN ] || [ "$draft" = true ]; then
+            echo "::notice::Skipping auto-merge: the pull request is no longer open and ready ($state, draft $draft)."
+            exit 0
+          fi
+
+          # Pin the head that was checked: a push in between fails this step.
           gh pr merge --auto --squash ${head_sha:+--match-head-commit "$head_sha"} "$PR_URL"
           echo "enabled=true" >> "$GITHUB_OUTPUT"
 

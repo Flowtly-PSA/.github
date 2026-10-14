@@ -12,8 +12,9 @@ on:
 permissions:
   contents: write
   pull-requests: write
-  # Dispatches the deploy after the merge (below). A caller that grants only the two scopes above
-  # still gets auto-merge; the dispatch then warns that it was refused and changes nothing.
+  # Dispatches the deploy after the merge (below), and lets the trusted path count skipped jobs.
+  # A caller that grants only the two scopes above still gets Dependabot auto-merge (the dispatch
+  # warns that it was refused); its trusted-path runs fail closed whenever that count is needed.
   actions: write
 
 jobs:
@@ -142,7 +143,8 @@ jobs:
               exit 0
             fi
           fi
-          gh pr merge --auto --squash "$PR_URL"
+          # On the trusted path, pin the head that was checked: a push in between fails this step.
+          gh pr merge --auto --squash ${head_sha:+--match-head-commit "$head_sha"} "$PR_URL"
           echo "enabled=true" >> "$GITHUB_OUTPUT"
 
       # THE MERGE ABOVE SHIPS NOTHING ON ITS OWN (flowtly-orchestration#947). Auto-merge was enabled

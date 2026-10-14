@@ -50,8 +50,10 @@ skipped while it was a draft); the next push arms it.
 
 GitHub's auto-merge waits only for required checks, so a non-required check that fails after arming
 would not stop the merge. The job therefore arms only once every workflow run on the head has
-finished (up to about an hour) and none of its jobs failed, was cancelled or timed out, judging each
-job name by its newest attempt, as steward's `merge.py` does. A red check refuses with a warning; a
+finished (up to about an hour) and none of its jobs failed, was cancelled or timed out, as steward's
+`merge.py` refuses a red check. Each workflow is judged per event by its newest run that did not skip
+outright, at its latest attempt, so a draft-era run or a superseded one is not the verdict. A head
+with no workflow run is refused too. A red check refuses with a warning; a
 re-run that turns it green does not re-arm (no `pull_request` event fires), so push again or merge by
 hand. Only GitHub Actions jobs are seen: commit statuses and other apps' check runs are out of scope,
 because callers grant no `checks: read`. A merge queue works as before: arming a green pull request
@@ -76,8 +78,9 @@ After enabling auto-merge the job waits (up to about an hour) for the merge, the
 deploy workflow the push would have run. A merge made with `GITHUB_TOKEN` creates no push run, so
 without this step the default branch moves and production does not (flowtly-orchestration#947).
 `workflow_dispatch` is exempt from that rule, so the deploy workflow must declare
-`workflow_dispatch:` among its triggers, and the caller must grant `actions: write`. Without either,
-auto-merge still works and the run log carries a warning naming what is missing.
+`workflow_dispatch:` among its triggers. Without it, auto-merge still works and the run log carries
+a warning naming what is missing. The caller must grant `actions: write`: without it the job cannot
+read the head's workflow runs and arms nothing.
 
 `.github/workflows/dependabot-auto-merge.yml` in the adopting repository:
 

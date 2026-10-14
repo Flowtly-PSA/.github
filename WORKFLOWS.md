@@ -46,9 +46,20 @@ Converting a pull request to draft disables its auto-merge, so draft means "do n
 with a warning in the run log, when the base branch has no required status check in branch protection
 or a ruleset, because `gh pr merge --auto` would then merge at once, before CI. On the trusted path
 it also refuses a pull request that is already mergeable while a check on its head was skipped (CI
-skipped while it was a draft); the next push arms it. Every armed pull request holds an
-`ubuntu-latest` job until it merges, up to about an hour, which is billed, but only when a deploy
-workflow would run on the merge (below); otherwise the job ends right after arming.
+skipped while it was a draft); the next push arms it.
+
+GitHub's auto-merge waits only for required checks, so a non-required check that fails after arming
+would not stop the merge. The job therefore arms only once every workflow run on the head has
+finished (up to about an hour) and none of its jobs failed, was cancelled or timed out, judging each
+job name by its newest attempt, as steward's `merge.py` does. A red check refuses with a warning; a
+re-run that turns it green does not re-arm (no `pull_request` event fires), so push again or merge by
+hand. Only GitHub Actions jobs are seen: commit statuses and other apps' check runs are out of scope,
+because callers grant no `checks: read`. A merge queue works as before: arming a green pull request
+enqueues it.
+
+Every pull request it handles holds an `ubuntu-latest` job while its CI runs, and an armed one keeps
+it until the merge, up to about an hour more, when a deploy workflow would run on the merge (below).
+All of it is billed.
 
 Known exception: `flowtly-subscriptions` gates its caller behind a Dependabot-only BP-24 job, so its
 other pull requests are never auto-merged. That is deliberate (fail-safe).

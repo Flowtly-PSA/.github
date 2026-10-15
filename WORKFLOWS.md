@@ -1,8 +1,19 @@
 # Reusable workflows
 
 Two reusable workflows live in `.github/workflows/` here. Every setting is in the reusable file; a
-repository adopts one by adding the small caller below, unchanged. Both reusable jobs run on
-`ubuntu-latest` for the reasons given in their comments (`CI_COST_CONVENTIONS.md`, rule 8).
+repository adopts one by adding the small caller below, unchanged. Both reusable jobs default to
+`ubuntu-latest` for compatibility. Callers can select self-hosted runners using the optional
+`runner-labels` input, a JSON label array. There is no fallback if the selected pool is offline.
+Auto-merge requires `gh`, `python3` and PyYAML on that pool. The caller's repository must have
+access to the runner group; this does not enable private runners for public repositories.
+
+For either reusable workflow, add alongside `uses`:
+
+```yaml
+with:
+  runner-labels: '["self-hosted", "Linux", "X64", "db-capable"]'
+```
+
 
 ## Stale pull requests
 

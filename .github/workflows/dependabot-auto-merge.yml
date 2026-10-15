@@ -10,6 +10,12 @@ name: Auto-merge
 
 on:
   workflow_call:
+    inputs:
+      runner-labels:
+        description: 'JSON runner label array. Self-hosted callers must provide the workflow toolchain.'
+        type: string
+        required: false
+        default: '["ubuntu-latest"]'
 
 permissions:
   contents: write
@@ -40,12 +46,11 @@ jobs:
           && (github.event.action == 'converted_to_draft'
               || (github.event.pull_request.draft == false
                   && github.event.pull_request.user.type != 'Bot')))
-    # ubuntu-* rather than the self-hosted fleet: this job calls `gh`, which the fleet does not
-    # ship (flowtly-global docs/RUNNERS.md, toolchain gaps).
-    runs-on: ubuntu-latest
+    # Default preserves existing callers. Self-hosted callers need gh, python3 and PyYAML.
+    runs-on: ${{ fromJSON(inputs.runner-labels) }}
     # Most of this is waiting: for CI to finish before arming, then for the merge so the deploy can
     # follow it (see the last step). Each wait is bounded to about an hour.
-    # GitHub-hosted minutes, not the self-hosted fleet.
+    # Runner choice is controlled by the caller.
     timeout-minutes: 130
     concurrency:
       group: dependabot-auto-merge-${{ github.repository }}-${{ github.event.pull_request.number }}

@@ -4,6 +4,12 @@ name: Stale pull requests
 
 on:
   workflow_call:
+    inputs:
+      runner-labels:
+        description: 'JSON runner label array. Self-hosted callers must provide the workflow toolchain.'
+        type: string
+        required: false
+        default: '["ubuntu-latest"]'
 
 permissions:
   actions: write # actions/stale keeps its run state in the Actions cache and deletes the old entry
@@ -12,10 +18,8 @@ permissions:
 
 jobs:
   stale:
-    # ubuntu-* rather than the self-hosted fleet: this job also runs in Flowtly-PSA/.github,
-    # which is public, and the fleet's runner group does not serve public repositories.
-    # One job of a few seconds per repository per week.
-    runs-on: ubuntu-latest
+    # Public callers retain the default; private callers can select their self-hosted pool.
+    runs-on: ${{ fromJSON(inputs.runner-labels) }}
     timeout-minutes: 10
     concurrency:
       group: stale-prs-${{ github.repository }}

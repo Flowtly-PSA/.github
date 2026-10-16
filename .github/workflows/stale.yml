@@ -8,6 +8,9 @@ on:
 jobs:
   stale:
     uses: Flowtly-PSA/.github/.github/workflows/stale-prs.yml@main
+    with:
+      # This repository is public: its code must never run on the org's own runners.
+      runner-labels: '["ubuntu-latest"]'
     permissions:
       actions: write
       issues: write

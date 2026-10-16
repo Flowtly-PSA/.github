@@ -12,10 +12,10 @@ on:
   workflow_call:
     inputs:
       runner-labels:
-        description: 'JSON runner label array. Self-hosted callers must provide the workflow toolchain.'
+        description: 'JSON runner label array. Defaults to the org self-hosted general pool; a public caller must pass ["ubuntu-latest"] (never run public-repo code on our runners).'
         type: string
         required: false
-        default: '["ubuntu-latest"]'
+        default: '["self-hosted","Linux","X64","general"]'
 
 permissions:
   contents: write
@@ -46,7 +46,7 @@ jobs:
           && (github.event.action == 'converted_to_draft'
               || (github.event.pull_request.draft == false
                   && github.event.pull_request.user.type != 'Bot')))
-    # Default preserves existing callers. Self-hosted callers need gh, python3 and PyYAML.
+    # Default is the org's self-hosted `general` pool (gh, python3 and PyYAML are present on every host of it).
     runs-on: ${{ fromJSON(inputs.runner-labels) }}
     # Most of this is waiting: for CI to finish before arming, then for the merge so the deploy can
     # follow it (see the last step). Each wait is bounded to about an hour.

@@ -6,10 +6,10 @@ on:
   workflow_call:
     inputs:
       runner-labels:
-        description: 'JSON runner label array. Self-hosted callers must provide the workflow toolchain.'
+        description: 'JSON runner label array. Defaults to the org self-hosted general pool; a public caller must pass ["ubuntu-latest"] (never run public-repo code on our runners).'
         type: string
         required: false
-        default: '["ubuntu-latest"]'
+        default: '["self-hosted","Linux","X64","general"]'
 
 permissions:
   actions: write # actions/stale keeps its run state in the Actions cache and deletes the old entry
@@ -18,7 +18,7 @@ permissions:
 
 jobs:
   stale:
-    # Public callers retain the default; private callers can select their self-hosted pool.
+    # Private callers get the self-hosted `general` pool by default; a public caller passes ["ubuntu-latest"].
     runs-on: ${{ fromJSON(inputs.runner-labels) }}
     timeout-minutes: 10
     concurrency:

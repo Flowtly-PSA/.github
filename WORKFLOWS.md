@@ -1,11 +1,13 @@
 # Reusable workflows
 
 Two reusable workflows live in `.github/workflows/` here. Every setting is in the reusable file; a
-repository adopts one by adding the small caller below, unchanged. Both reusable jobs default to
-`ubuntu-latest` for compatibility. Callers can select self-hosted runners using the optional
-`runner-labels` input, a JSON label array. There is no fallback if the selected pool is offline.
-Auto-merge requires `gh`, `python3` and PyYAML on that pool. The caller's repository must have
-access to the runner group; this does not enable private runners for public repositories.
+repository adopts one by adding the small caller below, unchanged. Both reusable jobs default to the org's
+self-hosted `general` pool (`["self-hosted","Linux","X64","general"]`); GitHub-hosted runners are not
+used by private repositories. A caller can choose another pool with the optional `runner-labels`
+input, a JSON label array. There is no fallback if the selected pool is offline. Auto-merge requires
+`gh`, `python3` and PyYAML on that pool (present on every `general` host). A **public** caller must
+pass `runner-labels: '["ubuntu-latest"]'` explicitly: public-repository code must never run on our
+own machines, and public repositories do not consume hosted minutes.
 
 For either reusable workflow, add alongside `uses`:
 
@@ -71,7 +73,7 @@ hand. Only GitHub Actions jobs are seen: commit statuses and other apps' check r
 because callers grant no `checks: read`. A merge queue works as before: arming a green pull request
 enqueues it.
 
-Every pull request it handles holds an `ubuntu-latest` job while its CI runs, and an armed one keeps
+Every pull request it handles holds a runner (the self-hosted `general` pool) job while its CI runs, and an armed one keeps
 it until the merge, up to about an hour more, when a deploy workflow would run on the merge (below).
 All of it is billed.
 

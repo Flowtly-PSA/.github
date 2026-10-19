@@ -2,7 +2,7 @@
 
 Two reusable workflows live in `.github/workflows/` here. Every setting is in the reusable file; a
 repository adopts one by adding the small caller below, unchanged. Both reusable jobs default to the org's
-self-hosted `general` pool (`["self-hosted","Linux","X64","general"]`); GitHub-hosted runners are not
+self-hosted `ci-control-merge` pool (`["self-hosted","Linux","X64","ci-control-merge"]`); GitHub-hosted runners are not
 used by private repositories. A caller can choose another pool with the optional `runner-labels`
 input, a JSON label array. There is no fallback if the selected pool is offline. Auto-merge requires
 `gh`, `python3` and PyYAML on that pool (present on every `general` host). A **public** caller must
@@ -73,9 +73,21 @@ hand. Only GitHub Actions jobs are seen: commit statuses and other apps' check r
 because callers grant no `checks: read`. A merge queue works as before: arming a green pull request
 enqueues it.
 
-Every pull request it handles holds a runner (the self-hosted `general` pool) job while its CI runs, and an armed one keeps
+Every pull request it handles holds a runner while its CI runs, and an armed one keeps
 it until the merge, up to about an hour more, when a deploy workflow would run on the merge (below).
-All of it is billed.
+These waits use the isolated `ci-control-merge` pool so they cannot occupy the general runners
+whose checks they await. Self-hosted execution adds no GitHub-hosted runner minutes.
+
+The organization pool has two services on the existing marketing host, each with a 512 MiB
+memory soft limit, 1 GiB hard limit, 128 MiB swap cap and half a CPU quota. They carry neither
+`general` nor `marketing`. The **CI merge control** runner group excludes public repositories
+and permits only jobs defined by this reusable workflow at `refs/heads/main`. The existing
+backend repository-scoped control runner remains available to that repository. All workers
+provide `gh`, `jq`, Python 3 and PyYAML; no checkout of caller code is needed.
+
+Changing the runner pool preserves the all-checks gate, trusted-author and Dependabot rules,
+head-SHA match, draft handling, and post-merge deployment dispatch. The input override still
+allows a caller with different infrastructure to select its own pool.
 
 Known exception: `flowtly-subscriptions` gates its caller behind a Dependabot-only BP-24 job, so its
 other pull requests are never auto-merged. That is deliberate (fail-safe).

@@ -1,11 +1,11 @@
 # Reusable workflows
 
 Two reusable workflows live in `.github/workflows/` here. Every setting is in the reusable file; a
-repository adopts one by adding the small caller below, unchanged. Both reusable jobs default to the org's
-self-hosted `ci-control-merge` pool (`["self-hosted","Linux","X64","ci-control-merge"]`); GitHub-hosted runners are not
-used by private repositories. A caller can choose another pool with the optional `runner-labels`
-input, a JSON label array. There is no fallback if the selected pool is offline. Auto-merge requires
-`gh`, `python3` and PyYAML on that pool (present on every `general` host). A **public** caller must
+repository adopts one by adding the small caller below. Auto-merge defaults to the isolated
+self-hosted `ci-control-merge` pool; stale-PR maintenance keeps the `general` pool. GitHub-hosted
+runners are not used by private repositories. A caller can choose another pool with the optional
+`runner-labels` input, a JSON label array. There is no fallback if the selected pool is offline.
+Auto-merge requires `gh`, `jq`, Python 3 and PyYAML on its control workers. A **public** caller must
 pass `runner-labels: '["ubuntu-latest"]'` explicitly: public-repository code must never run on our
 own machines, and public repositories do not consume hosted minutes.
 

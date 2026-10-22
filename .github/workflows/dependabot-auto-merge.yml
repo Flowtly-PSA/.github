@@ -251,8 +251,10 @@ jobs:
       #
       # workflow_dispatch IS an exception to that recursion guard (probed 2026-10-01: assetly.pl run
       # 36829156165, event workflow_dispatch, triggering_actor github-actions[bot]). So this step waits
-      # for the merge and dispatches each deploy workflow that the push WOULD have triggered, at the
-      # branch ref (never a re-run, which would replay an older tree).
+      # for the merge and dispatches each workflow that the push WOULD have triggered, at the branch
+      # ref (never a re-run, which would replay an older tree). That includes CI, not only deploys: a
+      # deploy that gates on the CI check-run of its commit fails when CI never ran there
+      # (Flowtly-PSA/.github#14), so CI workflows are dispatched first and deploy-named ones last.
       #
       # The `closed` event cannot carry this: it comes from the same GITHUB_TOKEN merge, so it is
       # suppressed the same way, and callers do not subscribe to it. The job that asked for the merge
@@ -339,7 +341,8 @@ jobs:
 
           # Waiting holds a billed runner until the merge, so wait only when a deploy workflow would
           # run: the rule below, on this pull request's files, at the base and at the head. Anything
-          # it cannot read or decide counts as "would run".
+          # it cannot read or decide counts as "would run". A pull request that deploys nothing gets
+          # no CI dispatch either: CI on the default branch matters here only to a deploy gated on it.
           due_deploy() {
             local ref=$1 wf
             gh api "repos/$REPO/contents/.github/workflows?ref=$ref" --jq '.[] | select(.type == "file") | .name' > "$work/pre" \
@@ -396,6 +399,10 @@ jobs:
           gh api "repos/$REPO/contents/.github/workflows?ref=$merged_sha" --jq '.[] | select(.type == "file") | .name' > "$work/workflows" \
             || { echo "::warning::Could not list workflows; no deploy dispatched."; exit 0; }
 
+          # CI first, deploy-named last, so a deploy gate polling for its commit's CI check-run finds it
+          # queued.
+          { grep -Ev 'deploy|publish|release' "$work/workflows"; grep -E 'deploy|publish|release' "$work/workflows"; } > "$work/ordered"
+
           dispatched=0
           while read -r wf; do
             case "$wf" in *.yml|*.yaml) ;; *) continue ;; esac
@@ -410,11 +417,13 @@ jobs:
               echo "::warning::$wf: cannot tell whether the push would have run it (${due#UNKNOWN }); not dispatched."
               continue
             fi
-            # Every push-triggered workflow would have run, not only deploys, but only a deploy
-            # leaves production behind; CI on the default branch is advisory here.
-            case "$wf" in *deploy*|*publish*|*release*) ;; *) continue ;; esac
             if [ "$can" != DISPATCHABLE ]; then
-              echo "::warning::$wf was due but declares no workflow_dispatch, so it cannot be started; $BASE is undeployed until it is. Add 'workflow_dispatch:' to its triggers."
+              case "$wf" in
+                *deploy*|*publish*|*release*)
+                  echo "::warning::$wf was due but declares no workflow_dispatch, so it cannot be started; $BASE is undeployed until it is. Add 'workflow_dispatch:' to its triggers." ;;
+                *)
+                  echo "::warning::$wf was due but declares no workflow_dispatch, so it cannot be started; $merged_sha has no run of it, and a deploy gated on it fails. Add 'workflow_dispatch:' to its triggers." ;;
+              esac
               continue
             fi
             n=$(gh api "repos/$REPO/actions/workflows/$wf/runs?head_sha=$merged_sha" --jq .total_count 2>/dev/null || echo "?")
@@ -428,5 +437,5 @@ jobs:
             else
               echo "::warning::$wf: dispatch refused. If this is a 403, the caller must grant 'actions: write' (WORKFLOWS.md)."
             fi
-          done < "$work/workflows"
-          echo "Deploy workflows dispatched: $dispatched."
+          done < "$work/ordered"
+          echo "Workflows dispatched: $dispatched."

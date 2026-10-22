@@ -101,10 +101,13 @@ The repository must allow auto-merge (Settings, General, "Allow auto-merge"), or
 fails.
 
 After enabling auto-merge the job waits (up to about an hour) for the merge, then dispatches each
-deploy workflow the push would have run. A merge made with `GITHUB_TOKEN` creates no push run, so
-without this step the default branch moves and production does not (flowtly-orchestration#947).
-`workflow_dispatch` is exempt from that rule, so the deploy workflow must declare
-`workflow_dispatch:` among its triggers. Without it, auto-merge still works and the run log carries
+workflow the push would have run: CI workflows first, then the deploy-named ones (`*deploy*`,
+`*publish*`, `*release*`), so a deploy that gates on its commit's CI check-run finds it queued
+(Flowtly-PSA/.github#14). A merge made with `GITHUB_TOKEN` creates no push run, so without this step
+the default branch moves and production does not (flowtly-orchestration#947). It waits only when a
+deploy-named workflow would run; a pull request that deploys nothing gets no dispatch at all.
+`workflow_dispatch` is exempt from that rule, so every workflow that runs on a push to the default
+branch, CI included, must declare `workflow_dispatch:` among its triggers. Without it, auto-merge still works and the run log carries
 a warning naming what is missing. The caller must grant `actions: write`: without it the job cannot
 read the head's workflow runs and arms nothing.
 

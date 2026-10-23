@@ -70,8 +70,10 @@ outright, at its latest attempt, so a draft-era run or a superseded one is not t
 with no workflow run is refused too. A red check refuses with a warning; a
 re-run that turns it green does not re-arm (no `pull_request` event fires), so push again or merge by
 hand. Only GitHub Actions jobs are seen: commit statuses and other apps' check runs are out of scope,
-because callers grant no `checks: read`. A merge queue works as before: arming a green pull request
-enqueues it.
+because callers grant no `checks: read`. Where the base branch has a merge queue, it arms nothing
+and exits with a notice: armed with `GITHUB_TOKEN`, the queue entry belongs to `github-actions[bot]`,
+GitHub starts no `merge_group` run for it, and it holds the head of the queue until the check timeout
+(flowtly-app-backend#9225). A person queues those pull requests.
 
 Every pull request it handles holds a runner while its CI runs, and an armed one keeps
 it until the merge, up to about an hour more, when a deploy workflow would run on the merge (below).

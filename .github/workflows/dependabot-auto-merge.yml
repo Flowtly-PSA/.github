@@ -129,6 +129,17 @@ jobs:
             exit 0
           fi
 
+          # Never arm auto-merge where the base has a merge queue. Armed with GITHUB_TOKEN, the
+          # queue entry belongs to github-actions[bot], and GitHub starts no merge_group run for
+          # it, so the entry holds the head of the queue until the check timeout
+          # (flowtly-app-backend#9225: four of four bot entries got no run). A person queues it.
+          queued=$(gh api "repos/$REPO/rules/branches/$BASE" --jq 'any(.[]; .type == "merge_queue")')
+          if [ "$queued" = true ]; then
+            [ "$armed" = true ] && gh pr merge --disable-auto "$PR_URL"
+            echo "::notice::Skipping auto-merge: $BASE has a merge queue, and a bot-queued entry gets no merge_group run. Queue it by hand."
+            exit 0
+          fi
+
           # `gh pr merge --auto` on a branch with no required status check merges at once, before
           # CI has run. Refuse unless the base branch requires at least one check, through branch
           # protection or a ruleset. An API failure fails this step, so nothing is merged.

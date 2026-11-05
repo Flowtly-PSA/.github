@@ -133,7 +133,18 @@ jobs:
           # queue entry belongs to github-actions[bot], and GitHub starts no merge_group run for
           # it, so the entry holds the head of the queue until the check timeout
           # (flowtly-app-backend#9225: four of four bot entries got no run). A person queues it.
-          queued=$(gh api "repos/$REPO/rules/branches/$BASE" --jq 'any(.[]; .type == "merge_queue")')
+          # Plan limit: on a private repository without GitHub Pro the rules read answers HTTP 403
+          # "Upgrade to GitHub Pro or make this repository public". Auto-merge cannot be armed on
+          # such a repository either, so say so and exit green. Any other failure still fails the
+          # step (flowtly-knowledge-base#1027: this job is not a quality check).
+          if ! queued=$(gh api "repos/$REPO/rules/branches/$BASE" --jq 'any(.[]; .type == "merge_queue")' 2>&1); then
+            if grep -q 'Upgrade to GitHub Pro' <<< "$queued"; then
+              echo "::notice::Skipping auto-merge: auto-merge is not available on this plan (rules API: upgrade required)."
+              exit 0
+            fi
+            echo "$queued" >&2
+            exit 1
+          fi
           if [ "$queued" = true ]; then
             [ "$armed" = true ] && gh pr merge --disable-auto "$PR_URL"
             echo "::notice::Skipping auto-merge: $BASE has a merge queue, and a bot-queued entry gets no merge_group run. Queue it by hand."

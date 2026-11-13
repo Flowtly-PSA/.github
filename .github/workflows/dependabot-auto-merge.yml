@@ -261,10 +261,23 @@ jobs:
             exit 0
           fi
           # The wait can be long: arm only a pull request that is still open and ready.
-          live=$(gh pr view "$PR_URL" --json state,isDraft --jq '[.state, .isDraft] | map(tostring) | join(" ")')
-          read -r state draft <<< "$live"
+          live=$(gh pr view "$PR_URL" --json state,isDraft,mergeStateStatus --jq '[.state, .isDraft, .mergeStateStatus] | map(tostring) | join(" ")')
+          read -r state draft merge_state <<< "$live"
           if [ "$state" != OPEN ] || [ "$draft" = true ]; then
             echo "::notice::Skipping auto-merge: the pull request is no longer open and ready ($state, draft $draft)."
+            exit 0
+          fi
+          # UNSTABLE: required checks pass but some other check is pending or not passing, often a
+          # commit status or another app's check run that the wait above cannot see. GitHub refuses
+          # enablePullRequestAutoMerge in that state ("Pull request is in unstable status"), which
+          # left a red check here (flowtly-global#911). Merging directly would go over that check,
+          # which is what this gate exists to prevent (flowtly-plugin#214), so skip with a warning.
+          if [ "$merge_state" = UNSTABLE ]; then
+            # Commit statuses are best effort: a caller without statuses:read only loses the detail.
+            pending=$(gh api "repos/$REPO/commits/$head_sha/status" \
+              --jq '[.statuses[] | select(.state != "success") | "\(.context) (\(.state))"] | join("; ")' 2>/dev/null) \
+              || pending=""
+            echo "::warning::Skipping auto-merge: the pull request is UNSTABLE, so a non-required check on $head_sha is pending or not passing: ${pending:-not visible to this workflow (a commit status or a check run of another app)}. Merge by hand once it passes, or push again to retry."
             exit 0
           fi
 

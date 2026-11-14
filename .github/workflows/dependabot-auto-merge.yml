@@ -267,17 +267,47 @@ jobs:
             echo "::notice::Skipping auto-merge: the pull request is no longer open and ready ($state, draft $draft)."
             exit 0
           fi
-          # UNSTABLE: required checks pass but some other check is pending or not passing, often a
-          # commit status or another app's check run that the wait above cannot see. GitHub refuses
-          # enablePullRequestAutoMerge in that state ("Pull request is in unstable status"), which
-          # left a red check here (flowtly-global#911). Merging directly would go over that check,
-          # which is what this gate exists to prevent (flowtly-plugin#214), so skip with a warning.
+          # UNSTABLE: required checks pass but some other check is pending or not passing. GitHub
+          # refuses enablePullRequestAutoMerge in that state ("Pull request is in unstable status";
+          # it left a red check here, flowtly-global#911).
+          #
+          # THE PENDING CHECK IS USUALLY THIS JOB (.github#21). While this step runs,
+          # `auto-merge / auto-merge` is itself an in-progress, non-required check run on the head.
+          # The wait above leaves its own workflow out, so it sees all green, but mergeStateStatus
+          # does not. Skipping on every UNSTABLE (#20) therefore left green PRs unmerged: nine in
+          # the first ten hours across four repositories.
+          #
+          # So decide what the gate can see. Every Actions job on the head was verified green
+          # above. Commit statuses must be readable and all `success`. Other apps' check runs are
+          # checked when this token can read them (callers grant no checks:read, and none exist in
+          # the org, sampled 2026-11-14). When all of that holds, the pending check is this job, and
+          # a direct merge pinned to the checked head does not go over a red check, which is what
+          # this gate exists to prevent (flowtly-plugin#214). Anything else keeps the warning.
           if [ "$merge_state" = UNSTABLE ]; then
-            # Commit statuses are best effort: a caller without statuses:read only loses the detail.
-            pending=$(gh api "repos/$REPO/commits/$head_sha/status" \
-              --jq '[.statuses[] | select(.state != "success") | "\(.context) (\(.state))"] | join("; ")' 2>/dev/null) \
-              || pending=""
-            echo "::warning::Skipping auto-merge: the pull request is UNSTABLE, so a non-required check on $head_sha is pending or not passing: ${pending:-not visible to this workflow (a commit status or a check run of another app)}. Merge by hand once it passes, or push again to retry."
+            if ! pending=$(gh api "repos/$REPO/commits/$head_sha/status" \
+                --jq '[.statuses[] | select(.state != "success") | "\(.context) (\(.state))"] | join("; ")' 2>/dev/null); then
+              echo "::warning::Skipping auto-merge: the pull request is UNSTABLE and this workflow cannot read the commit statuses on $head_sha to tell whether only its own check is pending. Merge by hand once every check passes."
+              exit 0
+            fi
+            if [ -n "$pending" ]; then
+              echo "::warning::Skipping auto-merge: the pull request is UNSTABLE, a commit status on $head_sha is pending or not passing: $pending. Merge by hand once it passes, or push again to retry."
+              exit 0
+            fi
+            # Best effort: unreadable without checks:read, and then there is nothing to add.
+            apps=$(gh api --paginate "repos/$REPO/commits/$head_sha/check-runs?per_page=100" \
+              --jq '.check_runs[] | select(.app.slug != "github-actions")
+                    | select(.status != "completed" or ((.conclusion // "") | test("^(success|neutral|skipped)$") | not))
+                    | "\(.name) (\(.conclusion // .status))"' 2>/dev/null | paste -sd';' -) || apps=""
+            if [ -n "$apps" ]; then
+              echo "::warning::Skipping auto-merge: the pull request is UNSTABLE, another app's check on $head_sha is pending or not passing: $apps. Merge by hand once it passes."
+              exit 0
+            fi
+            echo "UNSTABLE only through this job's own pending check: every Actions job is green and no commit status is pending, so merging $head_sha directly."
+            if ! gh pr merge --squash --match-head-commit "$head_sha" "$PR_URL"; then
+              echo "::warning::Skipping auto-merge: the direct merge of $head_sha was refused (above). Merge by hand."
+              exit 0
+            fi
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 

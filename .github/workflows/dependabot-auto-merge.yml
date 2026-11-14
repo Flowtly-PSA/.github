@@ -284,10 +284,14 @@ jobs:
           # a direct merge pinned to the checked head does not go over a red check, which is what
           # this gate exists to prevent (flowtly-plugin#214). Anything else keeps the warning.
           if [ "$merge_state" = UNSTABLE ]; then
+            # Callers grant no statuses:read either, so this read usually fails (helpers#779/#780 were
+            # skipped that way, 2026-11-14). Unreadable is not "pending": no repository in the org has a
+            # commit-status producer (none on the last 3 PRs of every repository, 2026-11-14), and every
+            # Actions job is verified above. A readable status that is not success still stops it.
             if ! pending=$(gh api "repos/$REPO/commits/$head_sha/status" \
                 --jq '[.statuses[] | select(.state != "success") | "\(.context) (\(.state))"] | join("; ")' 2>/dev/null); then
-              echo "::warning::Skipping auto-merge: the pull request is UNSTABLE and this workflow cannot read the commit statuses on $head_sha to tell whether only its own check is pending. Merge by hand once every check passes."
-              exit 0
+              echo "::notice::Commit statuses on $head_sha are not readable with this token; relying on the Actions verdict above."
+              pending=""
             fi
             if [ -n "$pending" ]; then
               echo "::warning::Skipping auto-merge: the pull request is UNSTABLE, a commit status on $head_sha is pending or not passing: $pending. Merge by hand once it passes, or push again to retry."

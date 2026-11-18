@@ -357,6 +357,11 @@ jobs:
           import re, sys, yaml
           branch, wf, changed = sys.argv[1], sys.argv[2], open(sys.argv[3]).read().split()
           def out(v, d=False):
+              # A workflow can say a dispatch is not a replay of its push (#25): a line
+              # `# auto-merge: do-not-dispatch` anywhere in it. flowtly-app-backend's infra-gcp.yml
+              # plans on push and applies its whole Terraform root on dispatch.
+              if d and v.startswith("TRIGGERS") and re.search(r"^\s*#\s*auto-merge:\s*do-not-dispatch\b", src, re.M):
+                  print(v); print("NOT_DISPATCHABLE opted out"); sys.exit(0)
               print(v); print("DISPATCHABLE" if d else "NOT_DISPATCHABLE"); sys.exit(0)
           def rx(p):
               if any(c in p for c in "![]+"): return None
@@ -378,7 +383,7 @@ jobs:
                   if r is None: unsup = True; continue
                   if re.fullmatch(r, f): return True
               return None if unsup else False
-          try: doc = yaml.safe_load(open(wf))
+          try: src = open(wf).read(); doc = yaml.safe_load(src)
           except Exception: out("UNKNOWN unparseable")
           if not isinstance(doc, dict): out("UNKNOWN not a mapping")
           on = doc.get("on", doc.get(True))
@@ -490,6 +495,10 @@ jobs:
             [ "$due" = IGNORED ] && continue
             if [ "${due%% *}" = UNKNOWN ]; then
               echo "::warning::$wf: cannot tell whether the push would have run it (${due#UNKNOWN }); not dispatched."
+              continue
+            fi
+            if [ "$can" = "NOT_DISPATCHABLE opted out" ]; then
+              echo "::notice::$wf would have run on this push, but it says a dispatch is not a replay of its push (auto-merge: do-not-dispatch); not dispatched."
               continue
             fi
             if [ "$can" != DISPATCHABLE ]; then

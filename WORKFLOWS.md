@@ -113,6 +113,11 @@ branch, CI included, must declare `workflow_dispatch:` among its triggers. Witho
 a warning naming what is missing. The caller must grant `actions: write`: without it the job cannot
 read the head's workflow runs and arms nothing.
 
+A dispatch is not always a replay of the push. A workflow whose dispatch does something its push does
+not, such as flowtly-app-backend's `infra-gcp.yml` (plans on push, applies the whole Terraform root on
+dispatch), carries the line `# auto-merge: do-not-dispatch` and is never dispatched after a merge; the
+run log says so (#25). Run it by hand when the merge needs it.
+
 `.github/workflows/dependabot-auto-merge.yml` in the adopting repository:
 
 ```yaml
